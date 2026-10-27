@@ -168,6 +168,7 @@ import {
   withoutEarlyClarifyProjection
 } from './restore-pending-clarify'
 import { projectPendingConnection, restorePendingConnectionFromSnapshot } from './restore-pending-connection'
+import { type GraftedTranscriptPage, graftTranscriptPage, settlePrefetchAtResumeBarrier } from './resume-barrier-reread'
 import {
   ambientResumeConnectionId,
   openResumeGateway,
@@ -2018,6 +2019,7 @@ export function useSessionActions({
         let prefetchApplied = false
         let prefetchedStoredSessionId: string | null = null
         let prefetchedTranscriptMessages: ChatMessage[] | null = null
+        let prefetchedPage: GraftedTranscriptPage | null = null
 
         // REST transcript prefetch and the gateway resume RPC are independent
         // — run them concurrently so a big session's wall time is
@@ -2095,18 +2097,9 @@ export function useSessionActions({
             : viewMessagesForReconcile()
 
           // Tail page + previously backfilled prefix (same-session re-resume).
-          // A long turn can push every rendered row off the newest page; read
-          // older pages until they overlap so the graft keeps earlier history.
-          const prefetchedTail = await extendRefreshPageToOverlap(
-            toChatMessages(prefetchedResult.messages),
-            previousMessages,
-            olderPageReader(storedSessionId, sessionRestScope, prefetchedResult)
-          )
-
-          const graftedPrefetch = graftRefreshedTailOntoBackfill(prefetchedTail, previousMessages)
-
-          prefetchedTranscriptMessages = graftedPrefetch
-          localSnapshot = reconcileAuthoritativeChatMessages(graftedPrefetch, previousMessages)
+          prefetchedPage = await graftTranscriptPage(prefetchedResult, previousMessages, storedSessionId, sessionRestScope)
+          prefetchedTranscriptMessages = prefetchedPage.transcript
+          localSnapshot = prefetchedPage.snapshot
           prefetchApplied = true
           prefetchedStoredSessionId = prefetchedResult.session_id || storedSessionId
 
@@ -2117,6 +2110,13 @@ export function useSessionActions({
         }
 
         const resumed = await resumePromise
+
+        ;({ localSnapshot, prefetchedResult, prefetchedTranscriptMessages } = await settlePrefetchAtResumeBarrier(
+          resumed,
+          { localSnapshot, prefetchedPage, prefetchedResult, prefetchedTranscriptMessages },
+          storedSessionId,
+          sessionRestScope
+        ))
 
         if (!isCurrentResume()) {
           return
