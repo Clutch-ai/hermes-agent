@@ -347,7 +347,8 @@ class SessionAuthority:
                 raise RuntimeStoreError('not_found') from None
             raise
 
-    async def attach(self, actor, ref):
+    async def attach(self, actor, ref, *, replay_from=None):
+        """*replay_from*: ``(epoch, sequence)`` this connection's reconnect replay answered (SessionEvents.catch_up)."""
         self.authorize(actor, ref, 'session:read')
         from gateway.session_local_recovery import local_history, prepare_history
         prepared = await prepare_history(self, ref)  # the lineage read stays off the loop and the lock
@@ -371,6 +372,8 @@ class SessionAuthority:
             allow_for_session((self.profile_id, ref.session_id))  # a closed session's work may start again
             transport = self.events.get(actor.transport_id)
             if transport is not None:
+                if replay_from is not None and not live.event_stream.fanout.contains(transport):
+                    live.event_stream.catch_up(transport, *replay_from)
                 live.event_stream.fanout.attach(transport)
                 live.event_stream.on_overflow = partial(self._retire_overflowed, ref.session_id)
             active_generation = handle.execution_generation if handle.execution_state == "running" else None

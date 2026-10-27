@@ -135,6 +135,8 @@ class AuthorityConnection:
         bind_native_transport(authority, self.actor, identity)
         self.native_owner = identity.get('native_bootstrap') is True
         self.subscriptions = {}
+        # session_id -> (epoch, sequence) the last reconnect replay answered; spent by the next resume.
+        self.replay_cursors = {}
         self.handed_back = set()  # sessions this live client detached without closing (the TUI's switcher)
         self._identity, self._operator, self._siblings = identity, operator, {}
         authority.events[self.actor.transport_id] = transport
@@ -582,6 +584,8 @@ class AuthorityConnection:
 
     async def resume(self, ref, params):
         from gateway.session_local_inventory import snapshot_info
+        replay_from = self.replay_cursors.pop(ref.session_id, None)
+        requested = ref.session_id
         if 'latest' in params:
             # Bare `-c` / `--resume latest`: the most recent session of that surface family the
             # actor may read (workspace first), resolved by the owner like a title.
@@ -637,7 +641,8 @@ class AuthorityConnection:
             # whose earlier open found it busy (Desktop's warm `session.activate` resumes on one connection).
             from gateway.session_policy_refresh import refresh_resumed_policy
             await refresh_resumed_policy(self.authority, ref, attached=ref.session_id in self.subscriptions)
-        snapshot = await self.authority.attach(self.actor, ref)
+        snapshot = await self.authority.attach(
+            self.actor, ref, replay_from=replay_from if ref.session_id == requested else None)
         self.subscriptions[ref.session_id] = snapshot.subscription_id
         self.handed_back.discard(ref.session_id)
         self._spawn_notice(ref)
@@ -716,7 +721,11 @@ class AuthorityConnection:
             raise RuntimeStoreError('invalid_params')
         from gateway.session_server_requests import open_requests
         stream = self.authority.sessions[ref.session_id].event_stream
-        return {**stream.since(epoch, sequence), 'open_requests': open_requests(stream, ref.session_id)}
+        replay = stream.since(epoch, sequence)
+        if not replay['snapshot_required']:
+            self.replay_cursors[ref.session_id] = (
+                replay['replay_epoch'], max((frame['seq'] for frame in replay['events']), default=sequence))
+        return {**replay, 'open_requests': open_requests(stream, ref.session_id)}
 
     async def submit(self, ref, params):
         if self._voice_stop_replay(ref, params) or await self._typed_voice_stop(ref, params):
